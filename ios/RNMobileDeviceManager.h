@@ -5,9 +5,11 @@
 #else
 #import <React/RCTBridgeModule.h>
 #endif
-@import AppConfigSettingsFramework;
 
 #import <UIKit/UIKit.h>
+#import "ManagedAppConfigKeys.h"
+
+@protocol ManagedAppConfigSettingsDelegate;
 
 @interface MobileDeviceManager : NSObject <RCTBridgeModule, ManagedAppConfigSettingsDelegate>
 @end

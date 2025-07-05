@@ -12,7 +12,7 @@ Pod::Spec.new do |s|
   s.homepage     = "https://github.com/robinpowered/react-native-mdm"
   s.platforms    = { :ios => "12.0", :osx => "10.14" }
   s.source       = { :git => "https://github.com/robinpowered/react-native-mdm.git", :tag => "v#{s.version}" }
-  s.source_files  = "ios/**/*.{h,m}"
+  s.source_files  = "ios/**/*.{h,m,swift}"
+  s.public_header_files = "ios/*.h", "ios/AppConfigSettingsFramework/*.h"
   s.dependency 'React'
-  s.dependency 'AppConfigSettingsFramework'
 end

@@ -1,9 +1,9 @@
 //  Created by David Shaw on 2/3/16.
 
+import Foundation
 import UIKit
 
-
-@objc public protocol ManagedAppConfigSettingsDelegate
+@objc public protocol ManagedAppConfigSettingsDelegate: NSObjectProtocol
 {
     func settingsDidChange(_ changes:[String : Any]);
 }
