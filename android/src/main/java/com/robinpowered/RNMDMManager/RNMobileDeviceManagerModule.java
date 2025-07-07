@@ -614,37 +614,52 @@ public class RNMobileDeviceManagerModule extends ReactContextBaseJavaModule impl
 
     // Helper method to check if device is managed
     private boolean checkIfManagedDevice() {
-        // 1. Check RestrictionsManager for app restrictions
+        boolean isManaged = false;
+        
+        // 1. Check RestrictionsManager for app restrictions (most reliable)
         RestrictionsManager restrictionsManager = (RestrictionsManager) getReactApplicationContext().getSystemService(Context.RESTRICTIONS_SERVICE);
         if (restrictionsManager != null) {
             Bundle appRestrictions = restrictionsManager.getApplicationRestrictions();
             if (appRestrictions.size() > 0) {
-                Log.d(TAG, "✅ Device is managed via RestrictionsManager");
-                return true;
+                Log.d(TAG, "✅ Device is managed via RestrictionsManager (has " + appRestrictions.size() + " restrictions)");
+                isManaged = true;
             }
         }
         
-        // 2. Check if device has active device administrators
+        // 2. Check if device has active device administrators (device-level management)
         DevicePolicyManager devicePolicyManager = (DevicePolicyManager) getReactApplicationContext().getSystemService(Context.DEVICE_POLICY_SERVICE);
         if (devicePolicyManager != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             try {
                 List activeAdmins = devicePolicyManager.getActiveAdmins();
                 if (activeAdmins != null && !activeAdmins.isEmpty()) {
-                    Log.d(TAG, "✅ Device is managed via DevicePolicyManager");
-                    return true;
+                    Log.d(TAG, "✅ Device has active administrators (device-level management)");
+                    
+                    // Only consider managed if THIS app is managed, not just the device
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        boolean isDeviceOwner = devicePolicyManager.isDeviceOwnerApp(getReactApplicationContext().getPackageName());
+                        boolean isProfileOwner = devicePolicyManager.isProfileOwnerApp(getReactApplicationContext().getPackageName());
+                        
+                        if (isDeviceOwner || isProfileOwner) {
+                            Log.d(TAG, "✅ THIS app is device/profile owner - managed");
+                            isManaged = true;
+                        } else {
+                            Log.d(TAG, "❌ Device has admins but THIS app is not managed");
+                        }
+                    }
                 }
             } catch (Exception e) {
                 Log.d(TAG, "Could not check active admins: " + e.getMessage());
             }
         }
         
-        // 3. Check if app is in work profile or device owner
-        if (checkIfDownloadedFromIntune()) {
-            Log.d(TAG, "✅ Device is managed via Intune distribution");
-            return true;
+        // 3. Check if downloaded from Intune (only if we have restrictions or ownership)
+        if (!isManaged && checkIfDownloadedFromIntune()) {
+            Log.d(TAG, "✅ Downloaded from Intune distribution");
+            isManaged = true;
         }
         
-        return false;
+        Log.d(TAG, "Final managed status: " + (isManaged ? "MANAGED" : "NOT MANAGED"));
+        return isManaged;
     }
 
     // Helper method to check if downloaded from Intune
@@ -652,46 +667,61 @@ public class RNMobileDeviceManagerModule extends ReactContextBaseJavaModule impl
         Context context = getReactApplicationContext();
         
         try {
-            // Check installer package
             PackageManager pm = context.getPackageManager();
             String installerPackage = pm.getInstallerPackageName(context.getPackageName());
             
-            // Check if installed via enterprise/work profile
-            if (installerPackage != null && 
-                (installerPackage.contains("work") || 
-                 installerPackage.contains("enterprise") ||
-                 installerPackage.contains("intune"))) {
-                return true;
-            }
+            Log.d(TAG, "Installer package: " + (installerPackage != null ? installerPackage : "null"));
             
-            // Check if app is in work profile
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                DevicePolicyManager devicePolicyManager = (DevicePolicyManager) context.getSystemService(Context.DEVICE_POLICY_SERVICE);
-                if (devicePolicyManager != null) {
-                    try {
-                        ApplicationInfo appInfo = pm.getApplicationInfo(context.getPackageName(), 0);
-                        List activeAdmins = devicePolicyManager.getActiveAdmins();
-                        boolean hasSystemManagement = activeAdmins != null && !activeAdmins.isEmpty();
-                        boolean isInWorkProfile = (appInfo.flags & ApplicationInfo.FLAG_INSTALLED) != 0 && hasSystemManagement;
-                        
-                        if (isInWorkProfile) {
-                            return true;
-                        }
-                    } catch (Exception e) {
-                        Log.d(TAG, "Could not check work profile: " + e.getMessage());
-                    }
+            // 1. Check installer package - be very specific
+            if (installerPackage != null) {
+                // Only consider specific Intune/enterprise installers
+                if (installerPackage.equals("com.microsoft.windowsintune.companyportal") ||
+                    installerPackage.equals("com.microsoft.intune") ||
+                    installerPackage.contains("enterprisestore") ||
+                    installerPackage.contains("workprofile")) {
+                    Log.d(TAG, "✅ Downloaded from Intune via installer: " + installerPackage);
+                    return true;
+                }
+                
+                // If installed from Play Store or unknown/null, likely not from Intune
+                if (installerPackage.equals("com.android.vending") || 
+                    installerPackage.equals("com.google.android.packageinstaller")) {
+                    Log.d(TAG, "❌ Downloaded from Play Store/Package Installer, not Intune");
+                    return false;
                 }
             }
             
-            // Check if device is device owner or profile owner
+            // 2. If installer is null (sideloaded APK), check for other Intune indicators
+            if (installerPackage == null) {
+                Log.d(TAG, "❌ No installer package (sideloaded APK), not from Intune");
+                
+                // Only consider Intune if there are actual MDM restrictions
+                RestrictionsManager restrictionsManager = (RestrictionsManager) context.getSystemService(Context.RESTRICTIONS_SERVICE);
+                if (restrictionsManager != null) {
+                    Bundle appRestrictions = restrictionsManager.getApplicationRestrictions();
+                    if (appRestrictions.size() > 0) {
+                        Log.d(TAG, "✅ Sideloaded but has MDM restrictions - could be Intune managed");
+                        return true;
+                    }
+                }
+                
+                return false;
+            }
+            
+            // 3. Check if device is device owner or profile owner (high confidence Intune)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 DevicePolicyManager devicePolicyManager = (DevicePolicyManager) context.getSystemService(Context.DEVICE_POLICY_SERVICE);
                 if (devicePolicyManager != null) {
-                    boolean isDeviceOwner = devicePolicyManager.isDeviceOwnerApp(context.getPackageName());
-                    boolean isProfileOwner = devicePolicyManager.isProfileOwnerApp(context.getPackageName());
-                    
-                    if (isDeviceOwner || isProfileOwner) {
-                        return true;
+                    try {
+                        boolean isDeviceOwner = devicePolicyManager.isDeviceOwnerApp(context.getPackageName());
+                        boolean isProfileOwner = devicePolicyManager.isProfileOwnerApp(context.getPackageName());
+                        
+                        if (isDeviceOwner || isProfileOwner) {
+                            Log.d(TAG, "✅ App is device/profile owner - from Intune");
+                            return true;
+                        }
+                    } catch (Exception e) {
+                        Log.d(TAG, "Could not check device/profile owner: " + e.getMessage());
                     }
                 }
             }
@@ -700,6 +730,7 @@ public class RNMobileDeviceManagerModule extends ReactContextBaseJavaModule impl
             Log.e(TAG, "Error checking Intune distribution: " + e.getMessage());
         }
         
+        Log.d(TAG, "❌ Not downloaded from Intune");
         return false;
     }
 
