@@ -531,4 +531,281 @@ public class RNMobileDeviceManagerModule extends ReactContextBaseJavaModule impl
         maybeUnregisterReceiver();
         getReactApplicationContext().removeLifecycleEventListener(this);
     }
+
+    // SIMPLIFIED METHODS - New simplified interface
+
+    @ReactMethod
+    public void getDeviceInfo(final Promise promise) {
+        Log.d(TAG, "=== Getting Android Device Management Info ===");
+        WritableMap deviceInfo = Arguments.createMap();
+        
+        Context context = getReactApplicationContext();
+        
+        try {
+            // Get bundle information
+            String bundleID = context.getPackageName();
+            deviceInfo.putString("bundleID", bundleID);
+            
+            // Check if managed
+            boolean isManaged = checkIfManagedDevice();
+            deviceInfo.putBoolean("isManaged", isManaged);
+            
+            // Check framework support
+            boolean hasManagedConfigFramework = checkManagedConfigFramework();
+            boolean hasDeviceManagementFramework = checkDeviceManagementFramework();
+            deviceInfo.putBoolean("hasManagedConfigFramework", hasManagedConfigFramework);
+            deviceInfo.putBoolean("hasDeviceManagementFramework", hasDeviceManagementFramework);
+            
+            // Android doesn't have provisioning profiles like iOS
+            deviceInfo.putBoolean("hasProvisioningProfile", false);
+            
+            // Check if downloaded from Intune
+            boolean downloadedFromIntune = checkIfDownloadedFromIntune();
+            deviceInfo.putBoolean("downloadedFromIntune", downloadedFromIntune);
+            
+            // Get organization information
+            WritableMap orgInfo = getOrganizationInformation();
+            deviceInfo.putMap("organizationInfo", orgInfo);
+            
+            // Extract company domain
+            String companyDomain = extractCompanyDomain();
+            if (companyDomain != null) {
+                deviceInfo.putString("companyDomain", companyDomain);
+            } else {
+                deviceInfo.putNull("companyDomain");
+            }
+            
+            Log.d(TAG, "Android device info result: " + deviceInfo.toString());
+            promise.resolve(deviceInfo);
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Error getting device info: " + e.getMessage());
+            promise.reject("ERROR", e.getMessage());
+        }
+    }
+
+    @ReactMethod
+    public void getOrganizationInfo(final Promise promise) {
+        WritableMap orgInfo = getOrganizationInformation();
+        promise.resolve(orgInfo);
+    }
+
+    @ReactMethod
+    public void refreshConfiguration(final Promise promise) {
+        Log.d(TAG, "=== Refreshing Android Configuration ===");
+        
+        // Force refresh of restrictions
+        try {
+            RestrictionsManager restrictionsManager = (RestrictionsManager) getReactApplicationContext().getSystemService(Context.RESTRICTIONS_SERVICE);
+            if (restrictionsManager != null) {
+                // Trigger a configuration refresh by re-checking restrictions
+                Bundle appRestrictions = restrictionsManager.getApplicationRestrictions();
+                Log.d(TAG, "Refreshed restrictions, found " + appRestrictions.size() + " keys");
+            }
+            
+            // Return fresh device info after refresh
+            getDeviceInfo(promise);
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Error refreshing configuration: " + e.getMessage());
+            promise.reject("ERROR", e.getMessage());
+        }
+    }
+
+    // Helper method to check if device is managed
+    private boolean checkIfManagedDevice() {
+        // 1. Check RestrictionsManager for app restrictions
+        RestrictionsManager restrictionsManager = (RestrictionsManager) getReactApplicationContext().getSystemService(Context.RESTRICTIONS_SERVICE);
+        if (restrictionsManager != null) {
+            Bundle appRestrictions = restrictionsManager.getApplicationRestrictions();
+            if (appRestrictions.size() > 0) {
+                Log.d(TAG, "✅ Device is managed via RestrictionsManager");
+                return true;
+            }
+        }
+        
+        // 2. Check if device has active device administrators
+        DevicePolicyManager devicePolicyManager = (DevicePolicyManager) getReactApplicationContext().getSystemService(Context.DEVICE_POLICY_SERVICE);
+        if (devicePolicyManager != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            try {
+                List activeAdmins = devicePolicyManager.getActiveAdmins();
+                if (activeAdmins != null && !activeAdmins.isEmpty()) {
+                    Log.d(TAG, "✅ Device is managed via DevicePolicyManager");
+                    return true;
+                }
+            } catch (Exception e) {
+                Log.d(TAG, "Could not check active admins: " + e.getMessage());
+            }
+        }
+        
+        // 3. Check if app is in work profile or device owner
+        if (checkIfDownloadedFromIntune()) {
+            Log.d(TAG, "✅ Device is managed via Intune distribution");
+            return true;
+        }
+        
+        return false;
+    }
+
+    // Helper method to check if downloaded from Intune
+    private boolean checkIfDownloadedFromIntune() {
+        Context context = getReactApplicationContext();
+        
+        try {
+            // Check installer package
+            PackageManager pm = context.getPackageManager();
+            String installerPackage = pm.getInstallerPackageName(context.getPackageName());
+            
+            // Check if installed via enterprise/work profile
+            if (installerPackage != null && 
+                (installerPackage.contains("work") || 
+                 installerPackage.contains("enterprise") ||
+                 installerPackage.contains("intune"))) {
+                return true;
+            }
+            
+            // Check if app is in work profile
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                DevicePolicyManager devicePolicyManager = (DevicePolicyManager) context.getSystemService(Context.DEVICE_POLICY_SERVICE);
+                if (devicePolicyManager != null) {
+                    try {
+                        ApplicationInfo appInfo = pm.getApplicationInfo(context.getPackageName(), 0);
+                        List activeAdmins = devicePolicyManager.getActiveAdmins();
+                        boolean hasSystemManagement = activeAdmins != null && !activeAdmins.isEmpty();
+                        boolean isInWorkProfile = (appInfo.flags & ApplicationInfo.FLAG_INSTALLED) != 0 && hasSystemManagement;
+                        
+                        if (isInWorkProfile) {
+                            return true;
+                        }
+                    } catch (Exception e) {
+                        Log.d(TAG, "Could not check work profile: " + e.getMessage());
+                    }
+                }
+            }
+            
+            // Check if device is device owner or profile owner
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                DevicePolicyManager devicePolicyManager = (DevicePolicyManager) context.getSystemService(Context.DEVICE_POLICY_SERVICE);
+                if (devicePolicyManager != null) {
+                    boolean isDeviceOwner = devicePolicyManager.isDeviceOwnerApp(context.getPackageName());
+                    boolean isProfileOwner = devicePolicyManager.isProfileOwnerApp(context.getPackageName());
+                    
+                    if (isDeviceOwner || isProfileOwner) {
+                        return true;
+                    }
+                }
+            }
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Error checking Intune distribution: " + e.getMessage());
+        }
+        
+        return false;
+    }
+
+    // Helper method to check managed config framework
+    private boolean checkManagedConfigFramework() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+            return false;
+        }
+        
+        RestrictionsManager restrictionsManager = (RestrictionsManager) getReactApplicationContext().getSystemService(Context.RESTRICTIONS_SERVICE);
+        return restrictionsManager != null;
+    }
+
+    // Helper method to check device management framework
+    private boolean checkDeviceManagementFramework() {
+        DevicePolicyManager devicePolicyManager = (DevicePolicyManager) getReactApplicationContext().getSystemService(Context.DEVICE_POLICY_SERVICE);
+        return devicePolicyManager != null;
+    }
+
+    // Helper method to get organization information
+    private WritableMap getOrganizationInformation() {
+        WritableMap orgInfo = Arguments.createMap();
+        
+        // 1. Try RestrictionsManager first
+        RestrictionsManager restrictionsManager = (RestrictionsManager) getReactApplicationContext().getSystemService(Context.RESTRICTIONS_SERVICE);
+        if (restrictionsManager != null) {
+            Bundle appRestrictions = restrictionsManager.getApplicationRestrictions();
+            
+            // Convert Bundle to WritableMap
+            for (String key : appRestrictions.keySet()) {
+                String value = appRestrictions.getString(key);
+                if (value != null) {
+                    orgInfo.putString(key, value);
+                }
+            }
+        }
+        
+        return orgInfo;
+    }
+
+    // Helper method to extract company domain directly from restrictions
+    private String extractCompanyDomain() {
+        RestrictionsManager restrictionsManager = (RestrictionsManager) getReactApplicationContext().getSystemService(Context.RESTRICTIONS_SERVICE);
+        if (restrictionsManager != null) {
+            Bundle appRestrictions = restrictionsManager.getApplicationRestrictions();
+            
+            // 1. Direct domain from configuration
+            String domain = appRestrictions.getString("AccountDomain");
+            if (domain != null && !domain.isEmpty()) {
+                return domain;
+            }
+            
+            // 2. Extract from email
+            String email = appRestrictions.getString("AccountEmail");
+            if (email != null && email.contains("@")) {
+                String[] parts = email.split("@");
+                if (parts.length > 1) {
+                    return parts[1];
+                }
+            }
+            
+            // 3. Extract from Intune UPN
+            String upn = appRestrictions.getString("IntuneMAMUPN");
+            if (upn != null && upn.contains("@")) {
+                String[] parts = upn.split("@");
+                if (parts.length > 1) {
+                    return parts[1];
+                }
+            }
+        }
+        
+        return null;
+    }
+
+    // Helper method to extract company domain (legacy - kept for compatibility)
+    private String extractCompanyDomainFromOrgInfo(WritableMap orgInfo) {
+        // 1. Direct domain from configuration
+        if (orgInfo.hasKey("AccountDomain")) {
+            String domain = orgInfo.getString("AccountDomain");
+            if (domain != null && !domain.isEmpty()) {
+                return domain;
+            }
+        }
+        
+        // 2. Extract from email
+        if (orgInfo.hasKey("AccountEmail")) {
+            String email = orgInfo.getString("AccountEmail");
+            if (email != null && email.contains("@")) {
+                String[] parts = email.split("@");
+                if (parts.length > 1) {
+                    return parts[1];
+                }
+            }
+        }
+        
+        // 3. Extract from Intune UPN
+        if (orgInfo.hasKey("IntuneMAMUPN")) {
+            String upn = orgInfo.getString("IntuneMAMUPN");
+            if (upn != null && upn.contains("@")) {
+                String[] parts = upn.split("@");
+                if (parts.length > 1) {
+                    return parts[1];
+                }
+            }
+        }
+        
+        return null;
+    }
 }
