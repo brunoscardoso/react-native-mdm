@@ -839,4 +839,224 @@ public class RNMobileDeviceManagerModule extends ReactContextBaseJavaModule impl
         
         return null;
     }
+
+    @ReactMethod
+    public void getDetailedDiagnostics(final Promise promise) {
+        Log.d(TAG, "=== Getting Android Detailed Diagnostics ===");
+        WritableMap diagnostics = Arguments.createMap();
+        
+        Context context = getReactApplicationContext();
+        
+        try {
+            // 1. Bundle Information
+            PackageManager pm = context.getPackageManager();
+            PackageInfo packageInfo = pm.getPackageInfo(context.getPackageName(), 0);
+            ApplicationInfo appInfo = pm.getApplicationInfo(context.getPackageName(), 0);
+            
+            WritableMap bundleDetails = Arguments.createMap();
+            bundleDetails.putString("bundleID", context.getPackageName());
+            bundleDetails.putString("version", String.valueOf(packageInfo.versionCode));
+            bundleDetails.putString("shortVersion", packageInfo.versionName != null ? packageInfo.versionName : "Unknown");
+            bundleDetails.putString("displayName", pm.getApplicationLabel(appInfo).toString());
+            bundleDetails.putString("teamID", "N/A (Android)");
+            bundleDetails.putBoolean("supportsAutoConfig", checkManagedConfigFramework());
+            
+            diagnostics.putMap("bundleInfo", bundleDetails);
+            
+            // 2. Provisioning Profile Analysis (Android equivalent - installer package)
+            WritableMap provisioningInfo = Arguments.createMap();
+            String installerPackage = pm.getInstallerPackageName(context.getPackageName());
+            
+            boolean isEnterprise = installerPackage != null && 
+                                  (installerPackage.contains("enterprise") || 
+                                   installerPackage.contains("intune") ||
+                                   installerPackage.contains("workprofile"));
+            boolean isPlayStore = "com.android.vending".equals(installerPackage);
+            boolean isVPP = installerPackage != null && installerPackage.contains("work");
+            boolean isDevelopment = installerPackage == null || 
+                                   installerPackage.equals("com.google.android.packageinstaller");
+            
+            provisioningInfo.putString("status", installerPackage != null ? "Found: " + installerPackage : "Unknown installer");
+            provisioningInfo.putBoolean("isEnterprise", isEnterprise);
+            provisioningInfo.putBoolean("isAppStore", isPlayStore);
+            provisioningInfo.putBoolean("isVPP", isVPP);
+            provisioningInfo.putBoolean("isDevelopment", isDevelopment);
+            
+            diagnostics.putMap("provisioningProfile", provisioningInfo);
+            
+            // 3. UserDefaults Analysis (Android equivalent - Restrictions)
+            RestrictionsManager restrictionsManager = (RestrictionsManager) context.getSystemService(Context.RESTRICTIONS_SERVICE);
+            WritableMap userDefaultsInfo = Arguments.createMap();
+            
+            if (restrictionsManager != null) {
+                Bundle appRestrictions = restrictionsManager.getApplicationRestrictions();
+                
+                // Check all potential MDM keys
+                String[] mdmKeys = {
+                    "com.google.android.work.configuration.managed",
+                    "AccountName", "AccountDomain", "AccountEmail",
+                    "IntuneMAMUPN", "IntuneComplianceStatus", "IntuneEnrollmentStatus",
+                    "ManagedConfiguration"
+                };
+                
+                WritableMap mdmKeysFound = Arguments.createMap();
+                for (String key : mdmKeys) {
+                    if (appRestrictions.containsKey(key)) {
+                        String value = appRestrictions.getString(key);
+                        if (value != null) {
+                            mdmKeysFound.putString(key, value);
+                            Log.d(TAG, "✅ Found MDM key: " + key + " = " + value);
+                        }
+                    } else {
+                        Log.d(TAG, "❌ Missing MDM key: " + key);
+                    }
+                }
+                
+                userDefaultsInfo.putMap("mdmKeys", mdmKeysFound);
+                userDefaultsInfo.putInt("mdmKeysCount", mdmKeysFound.toHashMap().size());
+                
+                // Get all restriction keys for analysis
+                WritableArray relevantKeys = Arguments.createArray();
+                String[] searchTerms = {"managed", "intune", "config", "policy", "account"};
+                
+                for (String key : appRestrictions.keySet()) {
+                    for (String term : searchTerms) {
+                        if (key.toLowerCase().contains(term.toLowerCase())) {
+                            WritableMap keyData = Arguments.createMap();
+                            keyData.putString("key", key);
+                            keyData.putString("value", appRestrictions.getString(key, "<null>"));
+                            relevantKeys.pushMap(keyData);
+                            break;
+                        }
+                    }
+                }
+                
+                userDefaultsInfo.putArray("relevantKeys", relevantKeys);
+                userDefaultsInfo.putInt("totalKeys", appRestrictions.size());
+            } else {
+                userDefaultsInfo.putMap("mdmKeys", Arguments.createMap());
+                userDefaultsInfo.putInt("mdmKeysCount", 0);
+                userDefaultsInfo.putArray("relevantKeys", Arguments.createArray());
+                userDefaultsInfo.putInt("totalKeys", 0);
+            }
+            
+            diagnostics.putMap("userDefaults", userDefaultsInfo);
+            
+            // 4. ManagedAppConfig Analysis (Android equivalent - RestrictionsManager)
+            WritableMap managedAppConfigInfo = Arguments.createMap();
+            if (restrictionsManager != null) {
+                Bundle appRestrictions = restrictionsManager.getApplicationRestrictions();
+                if (appRestrictions.size() > 0) {
+                    managedAppConfigInfo.putString("status", "Available");
+                    managedAppConfigInfo.putInt("configCount", appRestrictions.size());
+                    
+                    WritableMap config = Arguments.createMap();
+                    for (String key : appRestrictions.keySet()) {
+                        String value = appRestrictions.getString(key);
+                        if (value != null) {
+                            config.putString(key, value);
+                        }
+                    }
+                    managedAppConfigInfo.putMap("config", config);
+                    
+                    Log.d(TAG, "✅ Android RestrictionsManager found: " + appRestrictions.size() + " keys");
+                } else {
+                    managedAppConfigInfo.putString("status", "Not available");
+                    managedAppConfigInfo.putInt("configCount", 0);
+                    Log.d(TAG, "❌ Android RestrictionsManager not available");
+                }
+            } else {
+                managedAppConfigInfo.putString("status", "RestrictionsManager not available");
+                managedAppConfigInfo.putInt("configCount", 0);
+            }
+            
+            diagnostics.putMap("managedAppConfig", managedAppConfigInfo);
+            
+            // 5. Device Enrollment Detection
+            WritableMap enrollmentInfo = Arguments.createMap();
+            DevicePolicyManager devicePolicyManager = (DevicePolicyManager) context.getSystemService(Context.DEVICE_POLICY_SERVICE);
+            
+            boolean deviceEnrolled = false;
+            WritableArray foundEnrollmentKeys = Arguments.createArray();
+            
+            if (devicePolicyManager != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                try {
+                    List activeAdmins = devicePolicyManager.getActiveAdmins();
+                    if (activeAdmins != null && !activeAdmins.isEmpty()) {
+                        deviceEnrolled = true;
+                        WritableMap enrollmentData = Arguments.createMap();
+                        enrollmentData.putString("key", "ActiveAdmins");
+                        enrollmentData.putString("value", "Found " + activeAdmins.size() + " active admins");
+                        foundEnrollmentKeys.pushMap(enrollmentData);
+                        Log.d(TAG, "✅ Enrollment indicator: ActiveAdmins = " + activeAdmins.size());
+                    }
+                    
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        boolean isDeviceOwner = devicePolicyManager.isDeviceOwnerApp(context.getPackageName());
+                        boolean isProfileOwner = devicePolicyManager.isProfileOwnerApp(context.getPackageName());
+                        
+                        if (isDeviceOwner || isProfileOwner) {
+                            deviceEnrolled = true;
+                            WritableMap ownerData = Arguments.createMap();
+                            ownerData.putString("key", "AppOwnership");
+                            ownerData.putString("value", "DeviceOwner: " + isDeviceOwner + ", ProfileOwner: " + isProfileOwner);
+                            foundEnrollmentKeys.pushMap(ownerData);
+                            Log.d(TAG, "✅ App ownership: DeviceOwner=" + isDeviceOwner + ", ProfileOwner=" + isProfileOwner);
+                        }
+                    }
+                } catch (Exception e) {
+                    Log.d(TAG, "Could not check device policy: " + e.getMessage());
+                }
+            }
+            
+            enrollmentInfo.putBoolean("isDeviceEnrolled", deviceEnrolled);
+            enrollmentInfo.putArray("enrollmentKeys", foundEnrollmentKeys);
+            
+            diagnostics.putMap("enrollment", enrollmentInfo);
+            
+            // 6. Final Detection Logic Step-by-Step
+            WritableMap detectionSteps = Arguments.createMap();
+            
+            // Step 1: RestrictionsManager (equivalent to ManagedAppConfig)
+            boolean step1 = restrictionsManager != null && restrictionsManager.getApplicationRestrictions().size() > 0;
+            detectionSteps.putBoolean("step1_managedAppConfig", step1);
+            
+            // Step 2: Restrictions with MDM keys (equivalent to UserDefaults MDM)
+            boolean step2 = false;
+            if (restrictionsManager != null) {
+                Bundle restrictions = restrictionsManager.getApplicationRestrictions();
+                String[] mdmKeys = {"AccountName", "AccountDomain", "IntuneMAMUPN", "IntuneComplianceStatus"};
+                for (String key : mdmKeys) {
+                    if (restrictions.containsKey(key)) {
+                        step2 = true;
+                        break;
+                    }
+                }
+            }
+            detectionSteps.putBoolean("step2_userDefaultsMDM", step2);
+            
+            // Step 3: Device enrollment + managed config support
+            boolean supportsAutoConfig = checkManagedConfigFramework();
+            boolean step3 = deviceEnrolled && supportsAutoConfig;
+            detectionSteps.putBoolean("step3_enrollmentAndAutoConfig", step3);
+            
+            // Step 4: Final decision
+            boolean isManaged = step1 || step2 || step3;
+            detectionSteps.putBoolean("finalDecision", isManaged);
+            
+            diagnostics.putMap("detectionSteps", detectionSteps);
+            
+            Log.d(TAG, "=== Android Detection Steps Summary ===");
+            Log.d(TAG, "Step 1 (RestrictionsManager): " + (step1 ? "PASS" : "FAIL"));
+            Log.d(TAG, "Step 2 (Restrictions MDM): " + (step2 ? "PASS" : "FAIL"));
+            Log.d(TAG, "Step 3 (Enrollment + AutoConfig): " + (step3 ? "PASS" : "FAIL"));
+            Log.d(TAG, "Final Decision: " + (isManaged ? "MANAGED" : "NOT MANAGED"));
+            
+            promise.resolve(diagnostics);
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Error getting detailed diagnostics: " + e.getMessage());
+            promise.reject("ERROR", e.getMessage());
+        }
+    }
 }

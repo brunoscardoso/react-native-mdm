@@ -36,6 +36,47 @@ declare module 'react-native-mdm' {
   // Event listener callback type
   export type ConfigUpdateListener = (organizationInfo: OrganizationInfo) => void;
 
+  // Detailed diagnostics interface
+  export interface DetailedDiagnostics {
+    bundleInfo: {
+      bundleID: string;
+      version: string;
+      shortVersion: string;
+      displayName: string;
+      teamID: string;
+      supportsAutoConfig: boolean;
+    };
+    provisioningProfile: {
+      status: string;
+      isEnterprise?: boolean;
+      isAppStore?: boolean;
+      isAdHoc?: boolean;
+      isVPP?: boolean;
+      isDevelopment?: boolean;
+    };
+    userDefaults: {
+      mdmKeys: { [key: string]: any };
+      mdmKeysCount: number;
+      relevantKeys: Array<{ key: string; value: any }>;
+      totalKeys: number;
+    };
+    managedAppConfig: {
+      status: string;
+      config?: any;
+      configCount: number;
+    };
+    enrollment: {
+      isDeviceEnrolled: boolean;
+      enrollmentKeys: Array<{ key: string; value: any }>;
+    };
+    detectionSteps: {
+      step1_managedAppConfig: boolean;
+      step2_userDefaultsMDM: boolean;
+      step3_enrollmentAndAutoConfig: boolean;
+      finalDecision: boolean;
+    };
+  }
+
   // Simplified MobileDeviceManager interface
   interface MobileDeviceManager {
     // Main method - returns all essential information
@@ -46,6 +87,9 @@ declare module 'react-native-mdm' {
     
     // Force refresh of configuration
     refreshConfiguration(): Promise<DeviceManagementInfo>;
+    
+    // Get detailed diagnostics for debugging
+    getDetailedDiagnostics(): Promise<DetailedDiagnostics>;
     
     // Event listener for configuration changes
     addConfigListener(callback: ConfigUpdateListener): EmitterSubscription;

@@ -12,6 +12,7 @@ export default {
   getDeviceInfo: MobileDeviceManager.getDeviceInfo,
   getOrganizationInfo: MobileDeviceManager.getOrganizationInfo,
   refreshConfiguration: MobileDeviceManager.refreshConfiguration,
+  getDetailedDiagnostics: MobileDeviceManager.getDetailedDiagnostics,
   
   // Simplified event listener
   addConfigListener (callback) {
